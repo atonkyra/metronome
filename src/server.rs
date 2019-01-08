@@ -1,6 +1,7 @@
 extern crate serde;
 #[macro_use] extern crate serde_derive;
 extern crate rmp_serde as rmps;
+extern crate clap;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -9,6 +10,7 @@ use std::time::Duration;
 use std::net::UdpSocket;
 use rmps::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
+use clap::{Arg, App};
 
 mod lib;
 
@@ -82,8 +84,23 @@ fn handler_thread(running: Arc<AtomicBool>, to_socket: std::sync::mpsc::Sender<l
 }
 
 fn main() {
+    let matches = App::new("metronome-server")
+        .version("0.0")
+        .arg(
+            Arg::with_name("bind")
+                .short("b")
+                .long("bind")
+                .takes_value(true)
+                .required(true)
+        )
+        .get_matches();
+
+    let config = lib::datatypes::ServerConfig {
+        bind: matches.value_of("bind").unwrap().parse().unwrap(),
+    };
+
     let socket;
-    match UdpSocket::bind("127.0.0.1:13337") {
+    match UdpSocket::bind(config.bind) {
         Ok(bound_socket) => {
             socket = bound_socket;
         },

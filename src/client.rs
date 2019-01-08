@@ -2,7 +2,7 @@ extern crate time;
 extern crate serde;
 #[macro_use] extern crate serde_derive;
 extern crate rmp_serde as rmps;
-use std::net::{UdpSocket, SocketAddr};
+use std::net::{UdpSocket};
 use std::sync::mpsc::channel;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use rmps::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 extern crate clap;
-use clap::{Arg, App, SubCommand};
+use clap::{Arg, App};
 
 mod lib;
 
@@ -101,8 +101,6 @@ fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>
 
     let mut stats = lib::datatypes::Statistics::new();
 
-    let remote = SocketAddr::from(([127,0,0,1],13337));
-
     let pps_sleeptime = 1.0/(config.pps_limit as f64);
 
     while running.load(std::sync::atomic::Ordering::Relaxed) {
@@ -117,7 +115,7 @@ fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>
 
         if (cur_precise_time - last_msg_sent_precise) > pps_sleeptime {
             let msg = lib::datatypes::WrappedMessage {
-                addr: remote,
+                addr: config.remote,
                 message: lib::datatypes::MetronomeMessage {
                     mode: "ping".to_string(),
                     payload: Some("payload".to_string()),
@@ -172,12 +170,20 @@ fn main() {
                 .takes_value(true)
                 .default_value("1")
         )
+        .arg(
+            Arg::with_name("remote")
+                .short("r")
+                .long("remote")
+                .takes_value(true)
+                .required(true)
+        )
         .get_matches();
 
     let config = lib::datatypes::ClientConfig {
         pps_limit: matches.value_of("pps-max").unwrap().parse().unwrap(),
         payload_size: matches.value_of("payload-size").unwrap().parse().unwrap(),
         balance: matches.value_of("balance").unwrap().parse().unwrap(),
+        remote: matches.value_of("remote").unwrap().parse().unwrap(),
     };
 
     let socket;

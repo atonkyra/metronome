@@ -18,7 +18,7 @@ mod lib;
 
 fn socket_thread(socket: UdpSocket, running: Arc<AtomicBool>, received: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, transmit: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
     let zero_duration = Duration::from_secs(0);
-    let sleep_duration = Duration::from_millis(1);
+    let sleep_duration = Duration::from_micros(100);
     let mut work_done;
     let mut rxbuf = [0;65535];
     while running.load(std::sync::atomic::Ordering::Relaxed) {

@@ -83,7 +83,6 @@ fn scan_deadlines(inflight: &mut HashMap<u64, lib::datatypes::PingResult>, stats
         }
     }
     for expired_seq in expired.iter() {
-        println!("!! timeout seq={}", expired_seq);
         inflight.remove(expired_seq);
         stats.lost += 1;
     }

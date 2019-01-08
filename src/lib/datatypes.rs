@@ -32,7 +32,7 @@ pub struct Statistics {
 
 pub struct ClientConfig {
     pub pps_limit: u64,
-    pub payload_size: u64,
+    pub payload_size: usize,
     pub balance: f64,
     pub remote: SocketAddr,
 }

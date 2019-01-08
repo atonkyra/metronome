@@ -103,6 +103,8 @@ fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>
 
     let pps_sleeptime = 1.0/(config.pps_limit as f64);
 
+    let payload = std::iter::repeat("X").take(config.payload_size).collect::<String>();
+
     while running.load(std::sync::atomic::Ordering::Relaxed) {
         work_done = false;
         if let Ok(message_from_socket) = from_socket.recv_timeout(zero_duration) {
@@ -118,7 +120,7 @@ fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>
                 addr: config.remote,
                 message: lib::datatypes::MetronomeMessage {
                     mode: "ping".to_string(),
-                    payload: Some("payload".to_string()),
+                    payload: Some(payload.clone()),
                     seq: msg_seq,
                 }
             };

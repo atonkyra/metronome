@@ -1,0 +1,23 @@
+[package]
+name = "metronome"
+version = "0.1.0"
+authors = ["Antti Tönkyrä <daedalus@pingtimeout.net>"]
+edition = "2018"
+
+[[bin]]
+name = "client"
+path = "src/client.rs"
+
+[[bin]]
+name = "server"
+path = "src/server.rs"
+
+[dependencies]
+serde = "1.0.84"
+serde_derive = "1.0.84"
+rmp-serialize = "0.8.0"
+rmp = "0.8.7"
+rmp-serde = "0.13.7"
+rmpv = "0.4.0"
+time = "*"
+clap = "*"

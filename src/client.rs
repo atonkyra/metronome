@@ -16,7 +16,6 @@ use clap::{Arg, App};
 mod lib;
 
 fn socket_thread(socket: UdpSocket, running: Arc<AtomicBool>, received: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, transmit: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
-    let zero_duration = Duration::from_secs(0);
     let mut rxbuf = [0;65535];
     while running.load(std::sync::atomic::Ordering::Relaxed) {
         if let Ok(transmittable_message) = transmit.try_recv() {

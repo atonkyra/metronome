@@ -5,30 +5,29 @@ extern crate clap;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::thread;
 use std::time::Duration;
 use std::net::UdpSocket;
 use rmps::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
 use clap::{Arg, App};
+use std::thread;
 
 mod lib;
 
 fn socket_thread(socket: UdpSocket, running: Arc<AtomicBool>, received: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, transmit: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
-    let zero_duration = Duration::from_secs(0);
-    let sleep_duration = Duration::from_micros(100);
-    let mut work_done;
+    let sleep_duration = Duration::from_millis(1);
     let mut rxbuf = [0;65535];
+    let mut last_packet_processed: f64 = 0.0;
     while running.load(std::sync::atomic::Ordering::Relaxed) {
-        work_done = false;
-        if let Ok(transmittable_message) = transmit.recv_timeout(zero_duration) {
+        let cur_time = lib::util::get_time();
+        if let Ok(transmittable_message) = transmit.try_recv() {
             let mut buf = Vec::new();
             if let Ok(_serialized_message) = transmittable_message.message.serialize(&mut Serializer::new(&mut buf)) {
                 if let Err(_send_error) = socket.send_to(&buf, transmittable_message.addr) {
                     // TODO: log
                 }
             };
-            work_done = true;
+            last_packet_processed = cur_time;
         }
         if let Ok((_size, addr)) = socket.recv_from(&mut rxbuf) {
             let mut deserializer = Deserializer::from_slice(&rxbuf);
@@ -41,10 +40,10 @@ fn socket_thread(socket: UdpSocket, running: Arc<AtomicBool>, received: std::syn
                 };
                 if let Err(_result) = received.send(wrapped_message) {}
             }
-            work_done = true;
+            last_packet_processed = cur_time;
         }
         
-        if !work_done {
+        if cur_time - last_packet_processed > 5.0 {
             thread::sleep(sleep_duration);
         }
     }
@@ -68,16 +67,15 @@ fn handle_message(wrapped_message: lib::datatypes::WrappedMessage, to_socket: &s
 }
 
 fn handler_thread(running: Arc<AtomicBool>, to_socket: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, from_socket: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
-    let zero_duration = Duration::from_secs(0);
-    let sleep_duration = Duration::from_micros(100);
-    let mut work_done;
+    let sleep_duration = Duration::from_millis(1);
+    let mut last_packet_processed: f64 = 0.0;
     while running.load(std::sync::atomic::Ordering::Relaxed) {
-        work_done = false;
-        if let Ok(message_from_socket) = from_socket.recv_timeout(zero_duration) {
+        let cur_time = lib::util::get_time();
+        if let Ok(message_from_socket) = from_socket.try_recv() {
             handle_message(message_from_socket, &to_socket);
-            work_done = true;
+            last_packet_processed = cur_time;
         }
-        if !work_done {
+        if cur_time - last_packet_processed > 5.0 {
             thread::sleep(sleep_duration);
         }
     }

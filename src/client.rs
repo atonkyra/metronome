@@ -6,7 +6,6 @@ use std::net::{UdpSocket};
 use std::sync::mpsc::channel;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 use rmps::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
@@ -18,19 +17,15 @@ mod lib;
 
 fn socket_thread(socket: UdpSocket, running: Arc<AtomicBool>, received: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, transmit: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
     let zero_duration = Duration::from_secs(0);
-    let sleep_duration = Duration::from_micros(100);
-    let mut work_done;
     let mut rxbuf = [0;65535];
     while running.load(std::sync::atomic::Ordering::Relaxed) {
-        work_done = false;
-        if let Ok(transmittable_message) = transmit.recv_timeout(zero_duration) {
+        if let Ok(transmittable_message) = transmit.try_recv() {
             let mut buf = Vec::new();
             if let Ok(_serialized_message) = transmittable_message.message.serialize(&mut Serializer::new(&mut buf)) {
                 if let Err(_send_error) = socket.send_to(&buf, transmittable_message.addr) {
                     // TODO: log
                 }
             };
-            work_done = true;
         }
         if let Ok((_size, addr)) = socket.recv_from(&mut rxbuf) {
             let mut deserializer = Deserializer::from_slice(&rxbuf);
@@ -43,11 +38,6 @@ fn socket_thread(socket: UdpSocket, running: Arc<AtomicBool>, received: std::syn
                 };
                 if let Err(_result) = received.send(wrapped_message) {}
             }
-            work_done = true;
-        }
-        
-        if !work_done {
-            thread::sleep(sleep_duration);
         }
     }
 }
@@ -55,7 +45,6 @@ fn socket_thread(socket: UdpSocket, running: Arc<AtomicBool>, received: std::syn
 fn handle_message(inflight: &mut HashMap<u64, lib::datatypes::PingResult>, wrapped_message: lib::datatypes::WrappedMessage, _to_socket: &std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, stats: &mut lib::datatypes::Statistics) {
     let cur_time = lib::util::get_time();
     if let Some((_key, inflight_pingresult)) = inflight.remove_entry(&wrapped_message.message.seq) {
-        //println!("<- {} seq={}, rtt={}s", wrapped_message.message.mode, wrapped_message.message.seq, cur_time - inflight_pingresult.timestamp);
         stats.recv += 1;
         let timediff = cur_time - inflight_pingresult.timestamp;
         if stats.rtt_mavg == std::f64::INFINITY {
@@ -90,9 +79,6 @@ fn scan_deadlines(inflight: &mut HashMap<u64, lib::datatypes::PingResult>, stats
 
 fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>, to_socket: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, from_socket: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
     let mut inflight: HashMap<u64, lib::datatypes::PingResult> = HashMap::new();
-    let zero_duration = Duration::from_secs(0);
-    let sleep_duration = Duration::from_micros(100);
-    let mut work_done;
 
     let mut msg_seq: u64 = 0;
     let mut last_msg_sent_precise : f64 = 0.0;
@@ -105,10 +91,8 @@ fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>
     let payload = std::iter::repeat("X").take(config.payload_size).collect::<String>();
 
     while running.load(std::sync::atomic::Ordering::Relaxed) {
-        work_done = false;
-        if let Ok(message_from_socket) = from_socket.recv_timeout(zero_duration) {
+        if let Ok(message_from_socket) = from_socket.try_recv() {
             handle_message(&mut inflight, message_from_socket, &to_socket, &mut stats);
-            work_done = true;
         }
         
         let cur_time = lib::util::get_time();
@@ -132,7 +116,6 @@ fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>
                 stats.sent += 1;
                 last_msg_sent_precise = cur_precise_time;
             }
-            work_done = true;
         }
 
         if cur_time - last_report > 1.0 {
@@ -141,9 +124,6 @@ fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>
         }
 
         scan_deadlines(&mut inflight, &mut stats);
-        if !work_done {
-            thread::sleep(sleep_duration);
-        }
     }
 }
 

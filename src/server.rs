@@ -33,7 +33,6 @@ fn socket_thread(socket: UdpSocket, running: Arc<AtomicBool>, received: std::syn
             let mut deserializer = Deserializer::from_slice(&rxbuf);
             let rxmsg_result : Result<lib::datatypes::MetronomeMessage, _> = Deserialize::deserialize(&mut deserializer);
             if let Ok(received_message) = rxmsg_result {
-                // TODO: verify that it is ok to receive (key match)
                 let wrapped_message = lib::datatypes::WrappedMessage {
                     addr: addr,
                     message: received_message,
@@ -49,8 +48,11 @@ fn socket_thread(socket: UdpSocket, running: Arc<AtomicBool>, received: std::syn
     }
 }
 
-fn handle_message(wrapped_message: lib::datatypes::WrappedMessage, to_socket: &std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>) {
+fn handle_message(config: &lib::datatypes::ServerConfig, wrapped_message: lib::datatypes::WrappedMessage, to_socket: &std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>) {
     let message = wrapped_message.message;
+    if message.key != config.key {
+        return;
+    }
     if message.mode == "ping" {
         if let Some(payload) = message.payload {
             let reply_message = lib::datatypes::WrappedMessage {
@@ -59,6 +61,7 @@ fn handle_message(wrapped_message: lib::datatypes::WrappedMessage, to_socket: &s
                     mode: "pong".to_string(),
                     payload: Some(payload),
                     seq: message.seq,
+                    key: message.key,
                 }
             };
             if let Err(_result) = to_socket.send(reply_message) {}
@@ -66,13 +69,13 @@ fn handle_message(wrapped_message: lib::datatypes::WrappedMessage, to_socket: &s
     }
 }
 
-fn handler_thread(running: Arc<AtomicBool>, to_socket: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, from_socket: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
+fn handler_thread(config: lib::datatypes::ServerConfig, running: Arc<AtomicBool>, to_socket: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, from_socket: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
     let sleep_duration = Duration::from_millis(1);
     let mut last_packet_processed: f64 = 0.0;
     while running.load(std::sync::atomic::Ordering::Relaxed) {
         let cur_time = lib::util::get_time();
         if let Ok(message_from_socket) = from_socket.try_recv() {
-            handle_message(message_from_socket, &to_socket);
+            handle_message(&config, message_from_socket, &to_socket);
             last_packet_processed = cur_time;
         }
         if cur_time - last_packet_processed > 5.0 {
@@ -91,10 +94,18 @@ fn main() {
                 .takes_value(true)
                 .required(true)
         )
+        .arg(
+            Arg::with_name("key")
+                .short("k")
+                .long("key")
+                .takes_value(true)
+                .required(true)
+        )
         .get_matches();
 
     let config = lib::datatypes::ServerConfig {
         bind: matches.value_of("bind").unwrap().parse().unwrap(),
+        key: matches.value_of("key").unwrap().to_string(),
     };
 
     let socket;
@@ -119,7 +130,7 @@ fn main() {
     });
     let handler_thread_running = running.clone();
     let handler_thread = std::thread::spawn(|| {
-        handler_thread(handler_thread_running, socket_tx, socket_rx);
+        handler_thread(config, handler_thread_running, socket_tx, socket_rx);
     });
     sock_thread.join().unwrap();
     handler_thread.join().unwrap();

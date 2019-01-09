@@ -8,6 +8,7 @@ pub struct MetronomeMessage {
     pub mode: String,
     pub payload: Option<String>,
     pub seq: u64,
+    pub key: String,
 }
 
 pub struct WrappedMessage {
@@ -35,10 +36,12 @@ pub struct ClientConfig {
     pub payload_size: usize,
     pub balance: f64,
     pub remote: SocketAddr,
+    pub key: String,
 }
 
 pub struct ServerConfig {
     pub bind: SocketAddr,
+    pub key: String,
 }
 
 impl Statistics {

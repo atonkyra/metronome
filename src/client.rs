@@ -6,7 +6,6 @@ use std::net::{UdpSocket};
 use std::sync::mpsc::channel;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Duration;
 use rmps::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -41,7 +40,8 @@ fn socket_thread(socket: UdpSocket, running: Arc<AtomicBool>, received: std::syn
     }
 }
 
-fn handle_message(inflight: &mut HashMap<u64, lib::datatypes::PingResult>, wrapped_message: lib::datatypes::WrappedMessage, _to_socket: &std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, stats: &mut lib::datatypes::Statistics) {
+fn handle_message(config: &lib::datatypes::ClientConfig, inflight: &mut HashMap<u64, lib::datatypes::PingResult>, wrapped_message: lib::datatypes::WrappedMessage, _to_socket: &std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, stats: &mut lib::datatypes::Statistics) {
+    if wrapped_message.message.key != config.key { return; }
     let cur_time = lib::util::get_time();
     if let Some((_key, inflight_pingresult)) = inflight.remove_entry(&wrapped_message.message.seq) {
         stats.recv += 1;
@@ -91,7 +91,7 @@ fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>
 
     while running.load(std::sync::atomic::Ordering::Relaxed) {
         if let Ok(message_from_socket) = from_socket.try_recv() {
-            handle_message(&mut inflight, message_from_socket, &to_socket, &mut stats);
+            handle_message(&config, &mut inflight, message_from_socket, &to_socket, &mut stats);
         }
         
         let cur_time = lib::util::get_time();
@@ -104,6 +104,7 @@ fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>
                     mode: "ping".to_string(),
                     payload: Some(payload.clone()),
                     seq: msg_seq,
+                    key: config.key.clone(),
                 }
             };
             if let Ok(_) = to_socket.send(msg) {
@@ -157,6 +158,13 @@ fn main() {
                 .takes_value(true)
                 .required(true)
         )
+        .arg(
+            Arg::with_name("key")
+                .short("k")
+                .long("key")
+                .takes_value(true)
+                .required(true)
+        )
         .get_matches();
 
     let config = lib::datatypes::ClientConfig {
@@ -164,6 +172,7 @@ fn main() {
         payload_size: matches.value_of("payload-size").unwrap().parse().unwrap(),
         balance: matches.value_of("balance").unwrap().parse().unwrap(),
         remote: matches.value_of("remote").unwrap().parse().unwrap(),
+        key: matches.value_of("key").unwrap().to_string(),
     };
 
     let socket;

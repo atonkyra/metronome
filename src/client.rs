@@ -105,6 +105,7 @@ fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>
                     payload: Some(payload.clone()),
                     seq: msg_seq,
                     key: config.key.clone(),
+                    mul: config.balance,
                 }
             };
             if let Ok(_) = to_socket.send(msg) {

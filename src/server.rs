@@ -54,7 +54,11 @@ fn handle_message(config: &lib::datatypes::ServerConfig, wrapped_message: lib::d
         return;
     }
     if message.mode == "ping" {
-        if let Some(payload) = message.payload {
+        if let Some(mut payload) = message.payload {
+            if message.mul != 1.0 {
+                let target_len : usize = ((payload.len() as f32) * message.mul) as usize;
+                payload = std::iter::repeat(payload.chars().next().unwrap()).take(target_len).collect::<String>();
+            }
             let reply_message = lib::datatypes::WrappedMessage {
                 addr: wrapped_message.addr,
                 message: lib::datatypes::MetronomeMessage {
@@ -62,6 +66,7 @@ fn handle_message(config: &lib::datatypes::ServerConfig, wrapped_message: lib::d
                     payload: Some(payload),
                     seq: message.seq,
                     key: message.key,
+                    mul: message.mul,
                 }
             };
             if let Err(_result) = to_socket.send(reply_message) {}

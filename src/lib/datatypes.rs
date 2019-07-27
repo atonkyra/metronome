@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 pub struct MetronomeMessage {
     pub mode: String,
     pub payload: Option<String>,
+    pub mul: f32,
     pub seq: u64,
     pub key: String,
 }
@@ -34,7 +35,7 @@ pub struct Statistics {
 pub struct ClientConfig {
     pub pps_limit: u64,
     pub payload_size: usize,
-    pub balance: f64,
+    pub balance: f32,
     pub remote: SocketAddr,
     pub key: String,
 }

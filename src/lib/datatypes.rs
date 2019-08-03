@@ -38,6 +38,7 @@ pub struct ClientConfig {
     pub balance: f32,
     pub remote: SocketAddr,
     pub key: String,
+    pub prometheus: String,
 }
 
 pub struct ServerConfig {

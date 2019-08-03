@@ -2,6 +2,10 @@ extern crate time;
 extern crate serde;
 #[macro_use] extern crate serde_derive;
 extern crate rmp_serde as rmps;
+extern crate tempfile;
+use std::fs::Permissions;
+use std::os::unix::prelude::*;
+use std::io::Write;
 use std::net::{UdpSocket};
 use std::sync::mpsc::channel;
 use std::sync::atomic::AtomicBool;
@@ -76,6 +80,25 @@ fn scan_deadlines(inflight: &mut HashMap<u64, lib::datatypes::PingResult>, stats
     }
 }
 
+fn update_statistics(config: &lib::datatypes::ClientConfig, stats: &lib::datatypes::Statistics) {
+    let mut file = tempfile::NamedTempFile::new_in(&config.prometheus).unwrap();
+    let _ = writeln!(file, "metronome_sent {}", stats.sent);
+    let _ = writeln!(file, "metronome_recv {}", stats.recv);
+    let _ = writeln!(file, "metronome_lost {}", stats.lost);
+    if stats.rtt_mavg != std::f64::INFINITY {
+        let _ = writeln!(file, "metronome_rtt_mavg {}", stats.rtt_mavg);
+    }
+    let path = file.path().to_str().unwrap();
+    let _ = std::fs::set_permissions(path, Permissions::from_mode(0o744));
+    if let Ok(_persist_info) = file.persist(format!("{}/{}", &config.prometheus, "metronome.prom")) {
+    } else {
+        println!("error writing prometheus file");
+    }
+    
+//persist(config.prometheus.clone())
+//    file.write_fmt("{}\");
+}
+
 fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>, to_socket: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, from_socket: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
     let mut inflight: HashMap<u64, lib::datatypes::PingResult> = HashMap::new();
 
@@ -125,6 +148,9 @@ fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>
         }
 
         scan_deadlines(&mut inflight, &mut stats);
+        if last_report == cur_time && config.prometheus != "" {
+            update_statistics(&config, &stats);
+        }
     }
 }
 
@@ -166,6 +192,12 @@ fn main() {
                 .takes_value(true)
                 .required(true)
         )
+        .arg(
+            Arg::with_name("prometheus")
+                .long("prometheus")
+                .takes_value(true)
+                .default_value("")
+        )
         .get_matches();
 
     let config = lib::datatypes::ClientConfig {
@@ -174,6 +206,7 @@ fn main() {
         balance: matches.value_of("balance").unwrap().parse().unwrap(),
         remote: matches.value_of("remote").unwrap().parse().unwrap(),
         key: matches.value_of("key").unwrap().to_string(),
+        prometheus: matches.value_of("prometheus").unwrap().to_string(),
     };
 
     let socket;

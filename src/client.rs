@@ -18,7 +18,7 @@ use clap::{Arg, App};
 
 mod lib;
 
-fn socket_thread(socket: UdpSocket, running: Arc<AtomicBool>, received: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, transmit: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
+fn socket_thread(config: lib::datatypes::ClientConfig, socket: UdpSocket, running: Arc<AtomicBool>, received: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, transmit: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
     let mut rxbuf = [0;65535];
     while running.load(std::sync::atomic::Ordering::Relaxed) {
         if let Ok(transmittable_message) = transmit.try_recv() {
@@ -40,6 +40,10 @@ fn socket_thread(socket: UdpSocket, running: Arc<AtomicBool>, received: std::syn
                 };
                 if let Err(_result) = received.send(wrapped_message) {}
             }
+        }
+        if config.use_sleep {
+            let sleeptime = std::time::Duration::from_micros(100);
+            std::thread::sleep(sleeptime);
         }
     }
 }
@@ -80,26 +84,27 @@ fn scan_deadlines(inflight: &mut HashMap<u64, lib::datatypes::PingResult>, stats
     }
 }
 
-fn update_statistics(config: &lib::datatypes::ClientConfig, stats: &lib::datatypes::Statistics) {
-    let mut file = tempfile::NamedTempFile::new_in(&config.prometheus).unwrap();
-    let _ = writeln!(file, "metronome_sent {}", stats.sent);
-    let _ = writeln!(file, "metronome_recv {}", stats.recv);
-    let _ = writeln!(file, "metronome_lost {}", stats.lost);
-    if stats.rtt_mavg != std::f64::INFINITY {
-        let _ = writeln!(file, "metronome_rtt_mavg {}", stats.rtt_mavg);
+fn update_statistics(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>, stats_from_handler: std::sync::mpsc::Receiver<lib::datatypes::Statistics>) {
+    while running.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Ok(stats) = stats_from_handler.recv() {
+            let mut file = tempfile::NamedTempFile::new_in(&config.prometheus).unwrap();
+            let _ = writeln!(file, "metronome_sent {}", stats.sent);
+            let _ = writeln!(file, "metronome_recv {}", stats.recv);
+            let _ = writeln!(file, "metronome_lost {}", stats.lost);
+            if stats.rtt_mavg != std::f64::INFINITY {
+                let _ = writeln!(file, "metronome_rtt_mavg {}", stats.rtt_mavg);
+            }
+            let path = file.path().to_str().unwrap();
+            let _ = std::fs::set_permissions(path, Permissions::from_mode(0o744));
+            if let Ok(_persist_info) = file.persist(format!("{}/{}", &config.prometheus, "metronome.prom")) {
+            } else {
+                println!("error writing prometheus file");
+            }
+        }
     }
-    let path = file.path().to_str().unwrap();
-    let _ = std::fs::set_permissions(path, Permissions::from_mode(0o744));
-    if let Ok(_persist_info) = file.persist(format!("{}/{}", &config.prometheus, "metronome.prom")) {
-    } else {
-        println!("error writing prometheus file");
-    }
-    
-//persist(config.prometheus.clone())
-//    file.write_fmt("{}\");
 }
 
-fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>, to_socket: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, from_socket: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
+fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>, to_socket: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, from_socket: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>, to_stats: std::sync::mpsc::Sender<lib::datatypes::Statistics>) {
     let mut inflight: HashMap<u64, lib::datatypes::PingResult> = HashMap::new();
 
     let mut msg_seq: u64 = 0;
@@ -149,7 +154,14 @@ fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>
 
         scan_deadlines(&mut inflight, &mut stats);
         if last_report == cur_time && config.prometheus != "" {
-            update_statistics(&config, &stats);
+            if let Err(e) = to_stats.send(stats.clone()) {
+                println!("{}", e);
+            }
+        }
+
+        if config.use_sleep {
+            let sleeptime = std::time::Duration::from_micros(100);
+            std::thread::sleep(sleeptime);
         }
     }
 }
@@ -163,6 +175,11 @@ fn main() {
                 .long("pps-max")
                 .takes_value(true)
                 .default_value("1")
+        )
+        .arg(
+            Arg::with_name("use-sleep")
+                .short("S")
+                .long("use-sleep")
         )
         .arg(
             Arg::with_name("payload-size")
@@ -203,6 +220,7 @@ fn main() {
     let config = lib::datatypes::ClientConfig {
         pps_limit: matches.value_of("pps-max").unwrap().parse().unwrap(),
         payload_size: matches.value_of("payload-size").unwrap().parse().unwrap(),
+        use_sleep: matches.is_present("use-sleep"),
         balance: matches.value_of("balance").unwrap().parse().unwrap(),
         remote: matches.value_of("remote").unwrap().parse().unwrap(),
         key: matches.value_of("key").unwrap().to_string(),
@@ -225,14 +243,23 @@ fn main() {
     let running = Arc::new(AtomicBool::new(true));
     let (socket_thd_rx, socket_rx) = channel();
     let (socket_tx, socket_thd_tx) = channel();
+    let (stats_tx, stats_rx) = channel();
     let sock_thread_running = running.clone();
+    let socket_config = config.clone();
     let sock_thread = std::thread::spawn(|| {
-        socket_thread(socket, sock_thread_running, socket_thd_rx, socket_thd_tx);
+        socket_thread(socket_config, socket, sock_thread_running, socket_thd_rx, socket_thd_tx);
     });
     let handler_thread_running = running.clone();
+    let handler_config = config.clone();
     let handler_thread = std::thread::spawn(|| {
-        handler_thread(config, handler_thread_running, socket_tx, socket_rx);
+        handler_thread(handler_config, handler_thread_running, socket_tx, socket_rx, stats_tx);
+    });
+    let stats_thread_running = running.clone();
+    let stats_config = config.clone();
+    let stats_thread = std::thread::spawn(|| {
+        update_statistics(stats_config, stats_thread_running, stats_rx);
     });
     sock_thread.join().unwrap();
     handler_thread.join().unwrap();
+    stats_thread.join().unwrap();
 }

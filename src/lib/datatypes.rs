@@ -22,6 +22,7 @@ pub struct PingResult {
     pub deadline: f64,
 }
 
+#[derive(Clone)]
 pub struct Statistics {
     pub sent: u64,
     pub recv: u64,
@@ -32,9 +33,11 @@ pub struct Statistics {
     pub rtt_mavg: f64,
 }
 
+#[derive(Clone)]
 pub struct ClientConfig {
     pub pps_limit: u64,
     pub payload_size: usize,
+    pub use_sleep: bool,
     pub balance: f32,
     pub remote: SocketAddr,
     pub key: String,

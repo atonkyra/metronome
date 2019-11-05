@@ -3,6 +3,9 @@ extern crate serde_derive;
 extern crate rmp_serde as rmps;
 use std::net::SocketAddr;
 
+#[derive(Debug, Clone, Default)]
+pub struct ExporterOptions {}
+
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct MetronomeMessage {
     pub mode: String,
@@ -41,7 +44,8 @@ pub struct ClientConfig {
     pub balance: f32,
     pub remote: SocketAddr,
     pub key: String,
-    pub prometheus: String,
+    pub prometheus: SocketAddr,
+    pub probe_id: String,
 }
 
 pub struct ServerConfig {

@@ -1,15 +1,14 @@
+extern crate prometheus_exporter_base;
 extern crate time;
 extern crate serde;
 #[macro_use] extern crate serde_derive;
 extern crate rmp_serde as rmps;
 extern crate tempfile;
-use std::fs::Permissions;
-use std::os::unix::prelude::*;
-use std::io::Write;
 use std::net::{UdpSocket};
 use std::sync::mpsc::channel;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::Mutex;
 use rmps::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -85,23 +84,75 @@ fn scan_deadlines(inflight: &mut HashMap<u64, lib::datatypes::PingResult>, stats
 }
 
 fn update_statistics(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>, stats_from_handler: std::sync::mpsc::Receiver<lib::datatypes::Statistics>) {
-    while running.load(std::sync::atomic::Ordering::Relaxed) {
-        if let Ok(stats) = stats_from_handler.recv() {
-            let mut file = tempfile::NamedTempFile::new_in(&config.prometheus).unwrap();
-            let _ = writeln!(file, "metronome_sent {}", stats.sent);
-            let _ = writeln!(file, "metronome_recv {}", stats.recv);
-            let _ = writeln!(file, "metronome_lost {}", stats.lost);
-            if stats.rtt_mavg != std::f64::INFINITY {
-                let _ = writeln!(file, "metronome_rtt_mavg {}", stats.rtt_mavg);
-            }
-            let path = file.path().to_str().unwrap();
-            let _ = std::fs::set_permissions(path, Permissions::from_mode(0o744));
-            if let Ok(_persist_info) = file.persist(format!("{}/{}", &config.prometheus, "metronome.prom")) {
+    let stats_rx_channel_mutexed = Arc::new(Mutex::new(stats_from_handler));
+    let prometheus_data = Arc::new(Mutex::new("".to_string()));
+    let probe_id_cloned = config.probe_id.clone();
+    let prometheus_data_exporter = prometheus_data.clone();
+    let prometheus_data_receiver = prometheus_data.clone();
+    let stats_receiver = std::thread::spawn(move || {
+        let mut attributes = Vec::new();
+        attributes.push((
+            "probe_id", probe_id_cloned.as_str()
+        ));
+        while running.load(std::sync::atomic::Ordering::Relaxed) {
+            let received_stats: Option<lib::datatypes::Statistics>;
+            if let Ok(stats_rx_channel) = stats_rx_channel_mutexed.lock() {
+                if let Ok(received_stats_from_channel) = stats_rx_channel.recv() {
+                    received_stats = Some(received_stats_from_channel);
+                } else {
+                    received_stats = None;
+                }
             } else {
-                println!("error writing prometheus file");
+                received_stats = None;
+            }
+            if let Some(stats) = received_stats {
+                let mut stats_string = "".to_string();
+
+                let prom_sent = prometheus_exporter_base::PrometheusMetric::new(
+                    "metronome_sent", prometheus_exporter_base::MetricType::Counter, "sent packets"
+                );
+                prom_sent.render_header();
+                stats_string.push_str(&prom_sent.render_sample(Some(&attributes), stats.sent));
+
+                let prom_recv = prometheus_exporter_base::PrometheusMetric::new(
+                    "metronome_recv", prometheus_exporter_base::MetricType::Counter, "recv packets"
+                );
+                prom_recv.render_header();
+                stats_string.push_str(&prom_recv.render_sample(Some(&attributes), stats.recv));
+
+                let prom_lost = prometheus_exporter_base::PrometheusMetric::new(
+                    "metronome_lost", prometheus_exporter_base::MetricType::Counter, "lost packets"
+                );
+                prom_lost.render_header();
+                stats_string.push_str(&prom_lost.render_sample(Some(&attributes), stats.lost));
+
+                if stats.rtt_mavg != std::f64::INFINITY {
+                    let prom_rtt_mavg = prometheus_exporter_base::PrometheusMetric::new(
+                        "metronome_rtt_mavg", prometheus_exporter_base::MetricType::Gauge, "rtt mavg"
+                    );
+                    prom_rtt_mavg.render_header();
+                    stats_string.push_str(&prom_rtt_mavg.render_sample(Some(&attributes), stats.rtt_mavg));
+                }
+                if let Ok(mut prometheus_data_receiver) = prometheus_data_receiver.lock() {
+                    *prometheus_data_receiver = stats_string;
+                }
             }
         }
-    }
+    });
+
+    prometheus_exporter_base::render_prometheus(config.prometheus, lib::datatypes::ExporterOptions::default(), |_request, _options| {
+        async move {
+            if let Ok(prometheus_data_exporter) = prometheus_data_exporter.lock() {
+                let prometheus_data_out: String = prometheus_data_exporter.clone();
+                Ok(prometheus_data_out)
+            } else {
+                let no_stats = "".to_string();
+                Ok(no_stats)
+            }
+        }
+    });
+
+    stats_receiver.join().unwrap();
 }
 
 fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>, to_socket: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, from_socket: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>, to_stats: std::sync::mpsc::Sender<lib::datatypes::Statistics>) {
@@ -153,7 +204,7 @@ fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>
         }
 
         scan_deadlines(&mut inflight, &mut stats);
-        if last_report == cur_time && config.prometheus != "" {
+        if last_report == cur_time {
             if let Err(e) = to_stats.send(stats.clone()) {
                 println!("{}", e);
             }
@@ -210,10 +261,17 @@ fn main() {
                 .required(true)
         )
         .arg(
+            Arg::with_name("probe_id")
+                .short("i")
+                .long("id")
+                .takes_value(true)
+                .default_value("default")
+        )
+        .arg(
             Arg::with_name("prometheus")
                 .long("prometheus")
                 .takes_value(true)
-                .default_value("")
+                .default_value("0.0.0.0:9151")
         )
         .get_matches();
 
@@ -224,7 +282,8 @@ fn main() {
         balance: matches.value_of("balance").unwrap().parse().unwrap(),
         remote: matches.value_of("remote").unwrap().parse().unwrap(),
         key: matches.value_of("key").unwrap().to_string(),
-        prometheus: matches.value_of("prometheus").unwrap().to_string(),
+        prometheus: matches.value_of("prometheus").unwrap().parse().unwrap(),
+        probe_id: matches.value_of("probe_id").unwrap().to_string(),
     };
 
     let socket;

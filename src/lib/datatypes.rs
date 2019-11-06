@@ -48,8 +48,10 @@ pub struct ClientConfig {
     pub probe_id: String,
 }
 
+#[derive(Clone)]
 pub struct ServerConfig {
     pub bind: SocketAddr,
+    pub use_sleep: bool,
     pub key: String,
 }
 

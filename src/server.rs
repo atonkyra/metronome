@@ -14,11 +14,13 @@ use std::thread;
 
 mod lib;
 
-fn socket_thread(socket: UdpSocket, running: Arc<AtomicBool>, received: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, transmit: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
+fn socket_thread(config: lib::datatypes::ServerConfig, socket: UdpSocket, running: Arc<AtomicBool>, received: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, transmit: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
     let sleep_duration = Duration::from_millis(1);
     let mut rxbuf = [0;65535];
     let mut last_packet_processed: f64 = 0.0;
+    let mut something_done;
     while running.load(std::sync::atomic::Ordering::Relaxed) {
+        something_done = false;
         let cur_time = lib::util::get_time();
         if let Ok(transmittable_message) = transmit.try_recv() {
             let mut buf = Vec::new();
@@ -28,6 +30,7 @@ fn socket_thread(socket: UdpSocket, running: Arc<AtomicBool>, received: std::syn
                 }
             };
             last_packet_processed = cur_time;
+            something_done = true;
         }
         if let Ok((_size, addr)) = socket.recv_from(&mut rxbuf) {
             let mut deserializer = Deserializer::from_slice(&rxbuf);
@@ -40,10 +43,14 @@ fn socket_thread(socket: UdpSocket, running: Arc<AtomicBool>, received: std::syn
                 if let Err(_result) = received.send(wrapped_message) {}
             }
             last_packet_processed = cur_time;
+            something_done = true;
         }
         
         if cur_time - last_packet_processed > 5.0 {
             thread::sleep(sleep_duration);
+        } else if !something_done && config.use_sleep {
+            let sleeptime = std::time::Duration::from_micros(100);
+            thread::sleep(sleeptime);
         }
     }
 }
@@ -77,14 +84,20 @@ fn handle_message(config: &lib::datatypes::ServerConfig, wrapped_message: lib::d
 fn handler_thread(config: lib::datatypes::ServerConfig, running: Arc<AtomicBool>, to_socket: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, from_socket: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
     let sleep_duration = Duration::from_millis(1);
     let mut last_packet_processed: f64 = 0.0;
+    let mut something_done;
     while running.load(std::sync::atomic::Ordering::Relaxed) {
+        something_done = false;
         let cur_time = lib::util::get_time();
         if let Ok(message_from_socket) = from_socket.try_recv() {
             handle_message(&config, message_from_socket, &to_socket);
             last_packet_processed = cur_time;
+            something_done = true;
         }
         if cur_time - last_packet_processed > 5.0 {
             thread::sleep(sleep_duration);
+        } else if !something_done && config.use_sleep {
+            let sleeptime = std::time::Duration::from_micros(100);
+            thread::sleep(sleeptime);
         }
     }
 }
@@ -106,10 +119,16 @@ fn main() {
                 .takes_value(true)
                 .required(true)
         )
+        .arg(
+            Arg::with_name("use-sleep")
+                .short("S")
+                .long("use-sleep")
+        )
         .get_matches();
 
     let config = lib::datatypes::ServerConfig {
         bind: matches.value_of("bind").unwrap().parse().unwrap(),
+        use_sleep: matches.is_present("use-sleep"),
         key: matches.value_of("key").unwrap().to_string(),
     };
 
@@ -130,12 +149,14 @@ fn main() {
     let (socket_thd_rx, socket_rx) = channel();
     let (socket_tx, socket_thd_tx) = channel();
     let sock_thread_running = running.clone();
+    let config_socket_thread = config.clone();
+    let config_handler_thread = config.clone();
     let sock_thread = std::thread::spawn(|| {
-        socket_thread(socket, sock_thread_running, socket_thd_rx, socket_thd_tx);
+        socket_thread(config_socket_thread, socket, sock_thread_running, socket_thd_rx, socket_thd_tx);
     });
     let handler_thread_running = running.clone();
     let handler_thread = std::thread::spawn(|| {
-        handler_thread(config, handler_thread_running, socket_tx, socket_rx);
+        handler_thread(config_handler_thread, handler_thread_running, socket_tx, socket_rx);
     });
     sock_thread.join().unwrap();
     handler_thread.join().unwrap();

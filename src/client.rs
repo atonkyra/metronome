@@ -4,11 +4,11 @@ extern crate serde;
 #[macro_use] extern crate serde_derive;
 extern crate rmp_serde as rmps;
 extern crate tempfile;
+extern crate gethostname;
 use std::net::{UdpSocket};
 use std::sync::mpsc::channel;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::sync::Mutex;
 use rmps::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -20,24 +20,32 @@ mod lib;
 fn socket_thread(config: lib::datatypes::ClientConfig, socket: UdpSocket, running: Arc<AtomicBool>, received: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, transmit: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
     let mut rxbuf = [0;65535];
     while running.load(std::sync::atomic::Ordering::Relaxed) {
-        if let Ok(transmittable_message) = transmit.try_recv() {
-            let mut buf = Vec::new();
-            if let Ok(_serialized_message) = transmittable_message.message.serialize(&mut Serializer::new(&mut buf)) {
-                if let Err(_send_error) = socket.send_to(&buf, transmittable_message.addr) {
-                    // TODO: log
-                }
-            };
-        }
-        if let Ok((_size, addr)) = socket.recv_from(&mut rxbuf) {
-            let mut deserializer = Deserializer::from_slice(&rxbuf);
-            let rxmsg_result : Result<lib::datatypes::MetronomeMessage, _> = Deserialize::deserialize(&mut deserializer);
-            if let Ok(received_message) = rxmsg_result {
-                // TODO: verify that it is ok to receive (key match)
-                let wrapped_message = lib::datatypes::WrappedMessage {
-                    addr: addr,
-                    message: received_message,
+        loop {
+            if let Ok(transmittable_message) = transmit.try_recv() {
+                let mut buf = Vec::new();
+                if let Ok(_serialized_message) = transmittable_message.message.serialize(&mut Serializer::new(&mut buf)) {
+                    if let Err(_send_error) = socket.send_to(&buf, transmittable_message.addr) {
+                        // TODO: log
+                    }
                 };
-                if let Err(_result) = received.send(wrapped_message) {}
+            } else {
+                break;
+            }
+        }
+        loop {
+            if let Ok((_size, addr)) = socket.recv_from(&mut rxbuf) {
+                let mut deserializer = Deserializer::from_slice(&rxbuf);
+                let rxmsg_result : Result<lib::datatypes::MetronomeMessage, _> = Deserialize::deserialize(&mut deserializer);
+                if let Ok(received_message) = rxmsg_result {
+                    // TODO: verify that it is ok to receive (key match)
+                    let wrapped_message = lib::datatypes::WrappedMessage {
+                        addr: addr,
+                        message: received_message,
+                    };
+                    if let Err(_result) = received.send(wrapped_message) {}
+                }
+            } else {
+                break;
             }
         }
         if config.use_sleep {
@@ -83,79 +91,49 @@ fn scan_deadlines(inflight: &mut HashMap<u64, lib::datatypes::PingResult>, stats
     }
 }
 
-fn update_statistics(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>, stats_from_handler: std::sync::mpsc::Receiver<lib::datatypes::Statistics>) {
-    let stats_rx_channel_mutexed = Arc::new(Mutex::new(stats_from_handler));
-    let prometheus_data = Arc::new(Mutex::new("".to_string()));
+fn build_stats(stats: &lib::datatypes::Statistics, config: &lib::datatypes::ClientConfig) -> String {
+    let mut attributes = Vec::new();
+    let sid_cloned = config.sid.clone();
     let probe_id_cloned = config.probe_id.clone();
-    let prometheus_data_exporter = prometheus_data.clone();
-    let prometheus_data_receiver = prometheus_data.clone();
-    let stats_receiver = std::thread::spawn(move || {
-        let mut attributes = Vec::new();
-        attributes.push((
-            "probe_id", probe_id_cloned.as_str()
-        ));
-        while running.load(std::sync::atomic::Ordering::Relaxed) {
-            let received_stats: Option<lib::datatypes::Statistics>;
-            if let Ok(stats_rx_channel) = stats_rx_channel_mutexed.lock() {
-                if let Ok(received_stats_from_channel) = stats_rx_channel.recv() {
-                    received_stats = Some(received_stats_from_channel);
-                } else {
-                    received_stats = None;
-                }
-            } else {
-                received_stats = None;
-            }
-            if let Some(stats) = received_stats {
-                let mut stats_string = "".to_string();
+    attributes.push((
+        "sid", sid_cloned.as_str()
+    ));
+    attributes.push((
+        "probe_id", probe_id_cloned.as_str()
+    ));
 
-                let prom_sent = prometheus_exporter_base::PrometheusMetric::new(
-                    "metronome_sent", prometheus_exporter_base::MetricType::Counter, "sent packets"
-                );
-                prom_sent.render_header();
-                stats_string.push_str(&prom_sent.render_sample(Some(&attributes), stats.sent));
+    let mut stats_string = "".to_string();
 
-                let prom_recv = prometheus_exporter_base::PrometheusMetric::new(
-                    "metronome_recv", prometheus_exporter_base::MetricType::Counter, "recv packets"
-                );
-                prom_recv.render_header();
-                stats_string.push_str(&prom_recv.render_sample(Some(&attributes), stats.recv));
+    let prom_sent = prometheus_exporter_base::PrometheusMetric::new(
+        "metronome_client_sent", prometheus_exporter_base::MetricType::Counter, "sent packets"
+    );
+    prom_sent.render_header();
+    stats_string.push_str(&prom_sent.render_sample(Some(&attributes), stats.sent));
 
-                let prom_lost = prometheus_exporter_base::PrometheusMetric::new(
-                    "metronome_lost", prometheus_exporter_base::MetricType::Counter, "lost packets"
-                );
-                prom_lost.render_header();
-                stats_string.push_str(&prom_lost.render_sample(Some(&attributes), stats.lost));
+    let prom_recv = prometheus_exporter_base::PrometheusMetric::new(
+        "metronome_client_recv", prometheus_exporter_base::MetricType::Counter, "recv packets"
+    );
+    prom_recv.render_header();
+    stats_string.push_str(&prom_recv.render_sample(Some(&attributes), stats.recv));
 
-                if stats.rtt_mavg != std::f64::INFINITY {
-                    let prom_rtt_mavg = prometheus_exporter_base::PrometheusMetric::new(
-                        "metronome_rtt_mavg", prometheus_exporter_base::MetricType::Gauge, "rtt mavg"
-                    );
-                    prom_rtt_mavg.render_header();
-                    stats_string.push_str(&prom_rtt_mavg.render_sample(Some(&attributes), stats.rtt_mavg));
-                }
-                if let Ok(mut prometheus_data_receiver) = prometheus_data_receiver.lock() {
-                    *prometheus_data_receiver = stats_string;
-                }
-            }
-        }
-    });
+    let prom_lost = prometheus_exporter_base::PrometheusMetric::new(
+        "metronome_client_lost", prometheus_exporter_base::MetricType::Counter, "lost packets"
+    );
+    prom_lost.render_header();
+    stats_string.push_str(&prom_lost.render_sample(Some(&attributes), stats.lost));
 
-    prometheus_exporter_base::render_prometheus(config.prometheus, lib::datatypes::ExporterOptions::default(), |_request, _options| {
-        async move {
-            if let Ok(prometheus_data_exporter) = prometheus_data_exporter.lock() {
-                let prometheus_data_out: String = prometheus_data_exporter.clone();
-                Ok(prometheus_data_out)
-            } else {
-                let no_stats = "".to_string();
-                Ok(no_stats)
-            }
-        }
-    });
+    if stats.rtt_mavg != std::f64::INFINITY {
+        let prom_rtt_mavg = prometheus_exporter_base::PrometheusMetric::new(
+            "metronome_client_rtt_mavg", prometheus_exporter_base::MetricType::Gauge, "rtt mavg"
+        );
+        prom_rtt_mavg.render_header();
+        stats_string.push_str(&prom_rtt_mavg.render_sample(Some(&attributes), stats.rtt_mavg));
+    }
 
-    stats_receiver.join().unwrap();
+    return stats_string;
 }
 
-fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>, to_socket: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, from_socket: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>, to_stats: std::sync::mpsc::Sender<lib::datatypes::Statistics>) {
+fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>, to_socket: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, from_socket: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
     let mut inflight: HashMap<u64, lib::datatypes::PingResult> = HashMap::new();
 
     let mut msg_seq: u64 = 0;
@@ -185,6 +163,7 @@ fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>
                     seq: msg_seq,
                     key: config.key.clone(),
                     mul: config.balance,
+                    sid: config.sid.clone(),
                 }
             };
             if let Ok(_) = to_socket.send(msg) {
@@ -205,9 +184,18 @@ fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>
 
         scan_deadlines(&mut inflight, &mut stats);
         if last_report == cur_time {
-            if let Err(e) = to_stats.send(stats.clone()) {
-                println!("{}", e);
-            }
+            let stats_msg = lib::datatypes::WrappedMessage {
+                addr: config.remote,
+                message: lib::datatypes::MetronomeMessage {
+                    mode: "stat".to_string(),
+                    payload: Some(build_stats(&stats, &config)),
+                    seq: 0,
+                    key: config.key.clone(),
+                    mul: 0.0,
+                    sid: config.sid.clone(),
+                }
+            };
+            let _res = to_socket.send(stats_msg);
         }
 
         if config.use_sleep {
@@ -261,19 +249,28 @@ fn main() {
                 .required(true)
         )
         .arg(
-            Arg::with_name("probe_id")
+            Arg::with_name("session_id")
                 .short("i")
-                .long("id")
+                .long("session-id")
                 .takes_value(true)
-                .default_value("default")
+                .required(true)
         )
         .arg(
-            Arg::with_name("prometheus")
-                .long("prometheus")
+            Arg::with_name("probe_id")
+                .short("P")
+                .long("probe-id")
                 .takes_value(true)
-                .default_value("0.0.0.0:9151")
+                .default_value("")
         )
         .get_matches();
+
+    let probe_id;
+
+    if matches.value_of("probe_id").unwrap() == "" {
+        probe_id = gethostname::gethostname().into_string().unwrap();
+    } else {
+        probe_id = matches.value_of("probe_id").unwrap().to_string();
+    }
 
     let config = lib::datatypes::ClientConfig {
         pps_limit: matches.value_of("pps-max").unwrap().parse().unwrap(),
@@ -282,8 +279,8 @@ fn main() {
         balance: matches.value_of("balance").unwrap().parse().unwrap(),
         remote: matches.value_of("remote").unwrap().parse().unwrap(),
         key: matches.value_of("key").unwrap().to_string(),
-        prometheus: matches.value_of("prometheus").unwrap().parse().unwrap(),
-        probe_id: matches.value_of("probe_id").unwrap().to_string(),
+        probe_id: probe_id,
+        sid: matches.value_of("session_id").unwrap().to_string(),
     };
 
     let socket;
@@ -302,7 +299,6 @@ fn main() {
     let running = Arc::new(AtomicBool::new(true));
     let (socket_thd_rx, socket_rx) = channel();
     let (socket_tx, socket_thd_tx) = channel();
-    let (stats_tx, stats_rx) = channel();
     let sock_thread_running = running.clone();
     let socket_config = config.clone();
     let sock_thread = std::thread::spawn(|| {
@@ -311,14 +307,8 @@ fn main() {
     let handler_thread_running = running.clone();
     let handler_config = config.clone();
     let handler_thread = std::thread::spawn(|| {
-        handler_thread(handler_config, handler_thread_running, socket_tx, socket_rx, stats_tx);
-    });
-    let stats_thread_running = running.clone();
-    let stats_config = config.clone();
-    let stats_thread = std::thread::spawn(|| {
-        update_statistics(stats_config, stats_thread_running, stats_rx);
+        handler_thread(handler_config, handler_thread_running, socket_tx, socket_rx);
     });
     sock_thread.join().unwrap();
     handler_thread.join().unwrap();
-    stats_thread.join().unwrap();
 }

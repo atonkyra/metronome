@@ -13,6 +13,7 @@ pub struct MetronomeMessage {
     pub mul: f32,
     pub seq: u64,
     pub key: String,
+    pub sid: String,
 }
 
 pub struct WrappedMessage {
@@ -37,6 +38,14 @@ pub struct Statistics {
 }
 
 #[derive(Clone)]
+pub struct ServerStatistics {
+    pub sid: String,
+    pub last_rx: f64,
+    pub recv: u64,
+    pub client_stats: String,
+}
+
+#[derive(Clone)]
 pub struct ClientConfig {
     pub pps_limit: u64,
     pub payload_size: usize,
@@ -44,7 +53,7 @@ pub struct ClientConfig {
     pub balance: f32,
     pub remote: SocketAddr,
     pub key: String,
-    pub prometheus: SocketAddr,
+    pub sid: String,
     pub probe_id: String,
 }
 
@@ -53,6 +62,7 @@ pub struct ServerConfig {
     pub bind: SocketAddr,
     pub use_sleep: bool,
     pub key: String,
+    pub prometheus: SocketAddr,
 }
 
 impl Statistics {

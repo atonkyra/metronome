@@ -18,30 +18,32 @@ use std::thread;
 
 mod lib;
 
-fn socket_thread(config: lib::datatypes::ServerConfig, socket: UdpSocket, running: Arc<AtomicBool>, received: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, transmit: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
-    let sleep_duration = Duration::from_millis(1);
+fn socket_thread(_config: lib::datatypes::ServerConfig, socket_raw: UdpSocket, running: Arc<AtomicBool>, received: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, transmit: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
     let mut rxbuf = [0;65535];
-    let mut last_packet_processed: f64 = 0.0;
-    let mut something_done;
-    while running.load(std::sync::atomic::Ordering::Relaxed) {
-        something_done = false;
-        let cur_time = lib::util::get_time();
-        loop {
-            if let Ok(transmittable_message) = transmit.try_recv() {
+    let socket = Arc::new(socket_raw);
+    let socket_tx_thread = socket.clone();
+    let socket_rx_thread = socket.clone();
+    let running_tx_thread = running.clone();
+    let running_rx_thread = running.clone();
+
+    let tx_thread = thread::spawn(move || {
+        while running_tx_thread.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Ok(transmittable_message) = transmit.recv() {
                 let mut buf = Vec::new();
                 if let Ok(_serialized_message) = transmittable_message.message.serialize(&mut Serializer::new(&mut buf)) {
-                    if let Err(_send_error) = socket.send_to(&buf, transmittable_message.addr) {
+                    if let Err(_send_error) = socket_tx_thread.send_to(&buf, transmittable_message.addr) {
                         // TODO: log
                     }
                 };
-                last_packet_processed = cur_time;
-                something_done = true;
             } else {
                 break;
             }
         }
-        loop {
-            if let Ok((_size, addr)) = socket.recv_from(&mut rxbuf) {
+    });
+
+    let rx_thread = thread::spawn(move || {
+        while running_rx_thread.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Ok((_size, addr)) = socket_rx_thread.recv_from(&mut rxbuf) {
                 let mut deserializer = Deserializer::from_slice(&rxbuf);
                 let rxmsg_result : Result<lib::datatypes::MetronomeMessage, _> = Deserialize::deserialize(&mut deserializer);
                 if let Ok(received_message) = rxmsg_result {
@@ -51,20 +53,13 @@ fn socket_thread(config: lib::datatypes::ServerConfig, socket: UdpSocket, runnin
                     };
                     if let Err(_result) = received.send(wrapped_message) {}
                 }
-                last_packet_processed = cur_time;
-                something_done = true;
-            } else {
-                break;
             }
         }
-        
-        if cur_time - last_packet_processed > 5.0 {
-            thread::sleep(sleep_duration);
-        } else if !something_done && config.use_sleep {
-            let sleeptime = std::time::Duration::from_micros(100);
-            thread::sleep(sleeptime);
-        }
-    }
+
+    });
+
+    let _ = tx_thread.join();
+    let _ = rx_thread.join();
 }
 
 fn handle_message(config: &lib::datatypes::ServerConfig, wrapped_message: lib::datatypes::WrappedMessage, to_socket: &std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, client_stats: &mut Option<String>) -> bool {
@@ -103,19 +98,14 @@ fn handle_message(config: &lib::datatypes::ServerConfig, wrapped_message: lib::d
 
 fn handler_thread(config: lib::datatypes::ServerConfig, running: Arc<AtomicBool>, to_socket: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, from_socket: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>, to_stats: std::sync::mpsc::Sender<Vec<lib::datatypes::ServerStatistics>>) {
     let mut sessions: HashMap<String, ServerStatistics> = HashMap::new();
-    let sleep_duration = Duration::from_millis(1);
-    let mut last_packet_processed: f64 = 0.0;
     let mut last_stats_emitted: f64 = 0.0;
-    let mut something_done;
     while running.load(std::sync::atomic::Ordering::Relaxed) {
         let mut client_stats: Option<String> = None;
-        something_done = false;
-        let cur_time = lib::util::get_time();
-        if let Ok(message_from_socket) = from_socket.try_recv() {
+        let cur_time = lib::util::get_precise_time();
+
+        if let Ok(message_from_socket) = from_socket.recv_timeout(Duration::from_millis(100)) {
             let sid_cloned = message_from_socket.message.sid.clone();
             let message_ok = handle_message(&config, message_from_socket, &to_socket, &mut client_stats);
-            last_packet_processed = cur_time;
-            something_done = true;
             if message_ok {
                 if let Some(session_stats) = sessions.get_mut(&sid_cloned) {
                     if let Some(client_stats) = client_stats {
@@ -153,12 +143,6 @@ fn handler_thread(config: lib::datatypes::ServerConfig, running: Arc<AtomicBool>
                 last_stats_emitted = cur_time;
             }
         }
-        if cur_time - last_packet_processed > 5.0 {
-            thread::sleep(sleep_duration);
-        } else if !something_done && config.use_sleep {
-            let sleeptime = std::time::Duration::from_micros(100);
-            thread::sleep(sleeptime);
-        }
     }
 }
 
@@ -170,7 +154,6 @@ fn stats_thread(config: lib::datatypes::ServerConfig, running: Arc<AtomicBool>, 
 
     let stats_receiver = std::thread::spawn(move || {
         while running.load(std::sync::atomic::Ordering::Relaxed) {
-//            let received_stats: Option<Vec<lib::datatypes::ServerStatistics>>;
             if let Ok(stats_rx_channel) = stats_rx_channel_mutexed.lock() {
                 if let Ok(received_stats_from_channel) = stats_rx_channel.recv() {
                     let mut stats_string = "".to_string();
@@ -231,17 +214,10 @@ fn main() {
                 .takes_value(true)
                 .default_value("0.0.0.0:9150")
         )
-
-        .arg(
-            Arg::with_name("use-sleep")
-                .short("S")
-                .long("use-sleep")
-        )
         .get_matches();
 
     let config = lib::datatypes::ServerConfig {
         bind: matches.value_of("bind").unwrap().parse().unwrap(),
-        use_sleep: matches.is_present("use-sleep"),
         key: matches.value_of("key").unwrap().to_string(),
         prometheus: matches.value_of("prometheus").unwrap().parse().unwrap(),
     };
@@ -255,8 +231,8 @@ fn main() {
             return;
         }
     }
-    if let Err(_) = socket.set_nonblocking(true) {
-        // TODO: log
+    if let Err(_) = socket.set_read_timeout(Some(Duration::from_millis(100))) {
+        eprintln!("failed to set socket read timeout!");
         return;
     }
     let running = Arc::new(AtomicBool::new(true));

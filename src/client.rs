@@ -14,26 +14,34 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 extern crate clap;
 use clap::{Arg, App};
+use std::time::Duration;
 
 mod lib;
 
-fn socket_thread(config: lib::datatypes::ClientConfig, socket: UdpSocket, running: Arc<AtomicBool>, received: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, transmit: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
+fn socket_thread(_config: lib::datatypes::ClientConfig, socket_raw: UdpSocket, running: Arc<AtomicBool>, received: std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, transmit: std::sync::mpsc::Receiver<lib::datatypes::WrappedMessage>) {
     let mut rxbuf = [0;65535];
-    while running.load(std::sync::atomic::Ordering::Relaxed) {
-        loop {
-            if let Ok(transmittable_message) = transmit.try_recv() {
+    let running_tx_thread = running.clone();
+    let running_rx_thread = running.clone();
+    let socket = Arc::new(socket_raw);
+    let socket_tx_thread = socket.clone();
+    let socket_rx_thread = socket.clone();
+    let tx_thread = std::thread::spawn(move || {
+        while running_tx_thread.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Ok(transmittable_message) = transmit.recv() {
                 let mut buf = Vec::new();
                 if let Ok(_serialized_message) = transmittable_message.message.serialize(&mut Serializer::new(&mut buf)) {
-                    if let Err(_send_error) = socket.send_to(&buf, transmittable_message.addr) {
-                        // TODO: log
+                    if let Err(_send_error) = socket_tx_thread.send_to(&buf, transmittable_message.addr) {
+                        eprintln!("failed to send_to server");
                     }
                 };
             } else {
                 break;
             }
         }
-        loop {
-            if let Ok((_size, addr)) = socket.recv_from(&mut rxbuf) {
+    });
+    let rx_thread = std::thread::spawn(move || {
+        while running_rx_thread.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Ok((_size, addr)) = socket_rx_thread.recv_from(&mut rxbuf) {
                 let mut deserializer = Deserializer::from_slice(&rxbuf);
                 let rxmsg_result : Result<lib::datatypes::MetronomeMessage, _> = Deserialize::deserialize(&mut deserializer);
                 if let Ok(received_message) = rxmsg_result {
@@ -44,20 +52,16 @@ fn socket_thread(config: lib::datatypes::ClientConfig, socket: UdpSocket, runnin
                     };
                     if let Err(_result) = received.send(wrapped_message) {}
                 }
-            } else {
-                break;
             }
         }
-        if config.use_sleep {
-            let sleeptime = std::time::Duration::from_micros(100);
-            std::thread::sleep(sleeptime);
-        }
-    }
+    });
+    let _ = rx_thread.join();
+    let _ = tx_thread.join();
 }
 
 fn handle_message(config: &lib::datatypes::ClientConfig, inflight: &mut HashMap<u64, lib::datatypes::PingResult>, wrapped_message: lib::datatypes::WrappedMessage, _to_socket: &std::sync::mpsc::Sender<lib::datatypes::WrappedMessage>, stats: &mut lib::datatypes::Statistics) {
     if wrapped_message.message.key != config.key { return; }
-    let cur_time = lib::util::get_time();
+    let cur_time = lib::util::get_precise_time();
     if let Some((_key, inflight_pingresult)) = inflight.remove_entry(&wrapped_message.message.seq) {
         stats.recv += 1;
         let timediff = cur_time - inflight_pingresult.timestamp;
@@ -78,7 +82,7 @@ fn handle_message(config: &lib::datatypes::ClientConfig, inflight: &mut HashMap<
 }
 
 fn scan_deadlines(inflight: &mut HashMap<u64, lib::datatypes::PingResult>, stats: &mut lib::datatypes::Statistics) {
-    let cur_time = lib::util::get_time();
+    let cur_time = lib::util::get_precise_time();
     let mut expired: Vec<u64> = Vec::new();
     for (seq, item) in inflight.iter() {
         if cur_time > item.deadline {
@@ -151,7 +155,7 @@ fn handler_thread(config: lib::datatypes::ClientConfig, running: Arc<AtomicBool>
             handle_message(&config, &mut inflight, message_from_socket, &to_socket, &mut stats);
         }
         
-        let cur_time = lib::util::get_time();
+        let cur_time = lib::util::get_precise_time();
         let cur_precise_time = lib::util::get_precise_time();
 
         if (cur_precise_time - last_msg_sent_precise) > pps_sleeptime {
@@ -292,8 +296,8 @@ fn main() {
             return;
         }
     }
-    if let Err(_) = socket.set_nonblocking(true) {
-        // TODO: log
+    if let Err(_) = socket.set_read_timeout(Some(Duration::from_millis(100))) {
+        eprintln!("failed to set socket read timeout!");
         return;
     }
     let running = Arc::new(AtomicBool::new(true));

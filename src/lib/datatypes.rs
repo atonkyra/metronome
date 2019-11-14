@@ -60,7 +60,6 @@ pub struct ClientConfig {
 #[derive(Clone)]
 pub struct ServerConfig {
     pub bind: SocketAddr,
-    pub use_sleep: bool,
     pub key: String,
     pub prometheus: SocketAddr,
 }
